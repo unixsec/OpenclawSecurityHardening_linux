@@ -13,9 +13,19 @@
 |------|------|
 | **作者** | Alex |
 | **邮箱** | unix_sec@163.com |
-| **版本** | 1.1.0 |
+| **版本** | 1.2.0 |
 
-## v1.1 新增功能
+## v1.2 新增功能 (环境适配性)
+
+| 功能 | 说明 |
+|------|------|
+| **环境预检** | 启动时自动检测 systemd/防火墙/AppArmor/SELinux/Python3 等组件可用性 |
+| **智能跳过** | 缺失组件时优雅跳过对应加固项，给出原因和替代建议 |
+| **优雅降级** | Python3 不可用时状态管理自动降级为文本文件方式 |
+| **环境报告** | 主菜单显示环境检测结果，标注哪些加固项可能受限 |
+| **安全防护** | 去除 `set -e`，避免检测命令失败导致脚本退出崩溃 |
+
+## v1.1 功能
 
 | 功能 | 说明 |
 |------|------|
@@ -25,41 +35,47 @@
 | **调试模式** | 支持单独调试指定功能项 |
 | **状态管理** | JSON 状态文件记录加固状态 |
 
-## OpenClaw 部署安全风险分析
+## OpenClaw 安全风险分析
 
-在 Linux 环境部署 OpenClaw 时，面临以下特定安全风险：
+基于 OpenClaw **源码审计** + **互联网安全研究**（ClawHavoc 攻击、TIP 劫持漏洞、1800+ 暴露实例等），识别出 10 类安全风险：
 
-| 风险 | 说明 | 危害等级 | 加固项 |
-|------|------|----------|--------|
-| **服务高权限运行** | 服务以 root 或高权限用户运行 | 高 | 1, 4 |
-| **配置/密钥泄露** | config.yaml、Token 被读取 | 高 | 2, 3 |
-| **Gateway 端口暴露** | 18789 端口对外开放 | 高 | 5 |
-| **Agent 文件越界** | AI Agent 访问 /etc、/root 等敏感目录 | 高 | 6 |
-| **操作无审计** | Agent 操作无记录，难以追溯 | 中 | 7 |
-| **SSRF 攻击** | 通过 Agent 访问内网资源 | 高 | 8 |
-| **资源耗尽** | 恶意 prompt 导致 CPU/内存耗尽 | 中 | 9 |
-| **Bash 命令注入** | Agent 执行危险系统命令 | 高 | 10 |
+| 编号 | 风险 | 来源 | 说明 | 等级 |
+|------|------|------|------|------|
+| R1 | Gateway 暴露 | 安全研究 | 1800+ 实例暴露 API Key | **严重** |
+| R2 | 提示注入/命令注入 | 源码+研究 | Agent Shell 访问 + TIP 劫持 | **严重** |
+| R3 | MCP 工具投毒 | ClawHavoc | 341 恶意 Skill 窃取凭证 | **严重** |
+| R4 | SSRF 攻击 | 源码 | Agent 访问内网资源 | 高 |
+| R5 | 凭证泄露 | 安全研究 | Token/API Key/聊天记录 | **严重** |
+| R6 | 权限提升 | 源码 | elevated 工具+环境变量注入 | 高 |
+| R7 | 文件系统越界 | 源码 | 路径遍历/符号链接攻击 | 高 |
+| R8 | 资源耗尽 | 通用 | Fork 炸弹/内存耗尽 | 中 |
+| R9 | 供应链攻击 | ClawHavoc | ClawHub 恶意技能包 | **严重** |
+| R10 | 日志/数据泄露 | 源码 | 敏感信息写入日志 | 中 |
 
-## 加固项列表
+> 参考: [ClawHavoc 攻击](https://thehackernews.com/2026/02/researchers-find-341-malicious-clawhub.html) | [OpenClaw 安全模型缺陷](https://venturebeat.com/security/openclaw-agentic-ai-security-risk-ciso-guide) | [TIP 劫持漏洞](https://www.secrss.com/articles/83397)
 
-| # | 加固项 | 针对风险 | Linux 特有措施 |
-|---|--------|----------|----------------|
-| 1 | 创建专用服务账户 | 高权限运行 | nologin 账户、无 sudo |
-| 2 | 配置文件系统权限 | 配置泄露 | 640/750 权限 |
-| 3 | 生成安全配置 | 密钥泄露 | Token 生成、环境变量隔离 |
-| 4 | 安装 systemd 服务 | 高权限运行 | **进程沙箱** (见下文) |
-| 5 | 配置防火墙 | 端口暴露 | UFW/firewalld/iptables |
-| 6 | 配置 AppArmor/SELinux | 文件越界 | **强制访问控制** |
-| 7 | 启用审计策略 | 无审计 | **auditd** |
-| 8 | 网络出站白名单 | SSRF | **iptables 出站限制** |
-| 9 | 资源限制 | 资源耗尽 | **cgroup** |
-| 10 | Bash Tool 限制 | 命令注入 | **命令/路径白名单** |
+## 加固项列表 (12 项)
 
-## Linux 特有加固详解
+| # | 加固项 | 覆盖风险 | Linux 措施 |
+|---|--------|----------|------------|
+| 1 | Gateway 绑定加固 | R1 | loopback 强制 + 定时检查 |
+| 2 | 服务账户隔离 | R5 | nologin + 无 sudo |
+| 3 | 文件权限加固 | R5/R7 | 640/700 + 符号链接保护 |
+| 4 | 凭证安全管理 | R5 | Token + 环境变量过滤 |
+| 5 | systemd 进程沙箱 | R2/R6/R8 | seccomp + 能力限制 + cgroup |
+| 6 | 防火墙端口限制 | R1 | UFW/firewalld/iptables |
+| 7 | 网络出站白名单 | R4 | iptables 出站规则 |
+| 8 | AppArmor/SELinux | R7/R6 | 强制访问控制 |
+| 9 | Bash Tool 限制 | R2/R6 | 命令黑名单 + 受限 Shell |
+| 10 | 资源限制 | R8 | PAM limits |
+| 11 | **MCP/Skill 防护** | R9/R3 | Skill 审计 + 完整性检查 |
+| 12 | **日志审计与脱敏** | R10/R5 | auditd + logrotate + 脱敏 |
 
-### [4] systemd 进程沙箱
+## 加固详解
 
-Linux 的 systemd 提供了丰富的进程沙箱功能，这是 Windows 服务管理所不具备的：
+### [5] systemd 进程沙箱
+
+通过 systemd 的进程沙箱功能实现服务隔离：
 
 ```ini
 [Service]
@@ -86,9 +102,7 @@ CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 MemoryDenyWriteExecute=true
 ```
 
-**与 Windows 对比：** Windows 服务需要依赖 AppLocker + NTFS ACL + 服务账户权限组合实现类似效果，配置更复杂。
-
-### [6] AppArmor/SELinux 访问控制
+### [8] AppArmor/SELinux 访问控制
 
 限制 OpenClaw 进程只能访问特定目录：
 
@@ -109,9 +123,7 @@ profile openclaw {
 }
 ```
 
-**与 Windows 对比：** Windows 使用 AppLocker 实现类似功能，但主要针对可执行文件控制，对目录访问的精细控制不如 AppArmor。
-
-### [8] 网络出站白名单 (SSRF 防护)
+### [7] 网络出站白名单 (SSRF 防护)
 
 限制 OpenClaw 只能连接到指定的 AI API：
 
@@ -125,9 +137,7 @@ generativelanguage.googleapis.com
 
 脚本会自动解析这些域名的 IP 并配置防火墙规则。
 
-**与 Windows 对比：** Windows 可通过 Windows Firewall 实现，但配置出站规则需要更多步骤。
-
-### [9] cgroup 资源限制
+### [10] cgroup 资源限制
 
 防止恶意 prompt 导致资源耗尽：
 
@@ -145,9 +155,7 @@ TasksMax=100
 LimitNOFILE=4096
 ```
 
-**与 Windows 对比：** Windows 需要使用 Job Objects 或 WSL2 才能实现类似的资源隔离。
-
-### [10] Bash Tool 命令限制
+### [9] Bash Tool 命令限制
 
 防止 AI Agent 执行危险命令：
 
@@ -304,6 +312,23 @@ ALLOWED_WORK_DIRS=(
 | 资源限制配置 | `ls /etc/systemd/system/openclaw.service.d/` | 存在 |
 
 ## 更新日志
+
+### v1.2.0 (2026-02-09)
+- 新增: 环境适配性检测框架，启动时自动检测所有依赖组件
+- 新增: 环境预检报告，主菜单展示组件可用性状态
+- 新增: 每个加固项/回退项增加前置依赖检查，缺失组件时智能跳过
+- 新增: Python3 不可用时状态管理自动降级为文本文件
+- 新增: `generate_token()` 多方案备选 (urandom → openssl → sha256)
+- 优化: `do_apply_1` 检测 ss/netstat 互备，非 systemd 跳过定时器
+- 优化: `do_apply_2` 检测 useradd、nologin shell 路径自适应
+- 优化: `do_apply_5` 检测 systemd + 服务账户是否存在
+- 优化: `do_apply_6` 防火墙全链路检查 (命令 + 服务状态 + 规则持久化)
+- 优化: `do_apply_7` dig + 防火墙双重检查，域名解析失败单独跳过
+- 优化: `do_apply_8` AppArmor/SELinux 深度检查 (启用状态 + parser 工具)
+- 优化: `do_apply_10` PAM limits 目录存在性检查
+- 优化: `do_apply_12` auditd/脱敏/logrotate 三段独立降级
+- 修复: 去除 `set -e`，避免检测命令失败导致脚本退出
+- 修复: auditd 检测逻辑运算符优先级问题
 
 ### v1.1.0 (2026-02-06)
 - 重新设计: 专注于 OpenClaw 部署风险

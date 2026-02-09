@@ -13,9 +13,19 @@ This script focuses on addressing **security risks specific to OpenClaw deployme
 |------|-------------|
 | **Author** | Alex |
 | **Email** | unix_sec@163.com |
-| **Version** | 1.1.0 |
+| **Version** | 1.2.0 |
 
-## v1.1 New Features
+## v1.2 New Features (Environment Adaptability)
+
+| Feature | Description |
+|---------|-------------|
+| **Environment Pre-check** | Auto-detect systemd/firewall/AppArmor/SELinux/Python3 availability at startup |
+| **Smart Skip** | Gracefully skip hardening items when components are missing, with reasons and alternatives |
+| **Graceful Degradation** | State management falls back to text file when Python3 is unavailable |
+| **Environment Report** | Main menu shows detection results, indicating which items may be limited |
+| **Crash Prevention** | Removed `set -e` to prevent detection command failures from crashing the script |
+
+## v1.1 Features
 
 | Feature | Description |
 |---------|-------------|
@@ -25,41 +35,47 @@ This script focuses on addressing **security risks specific to OpenClaw deployme
 | **Debug Mode** | Support debugging individual items |
 | **State Management** | JSON state file tracks hardening status |
 
-## OpenClaw Deployment Security Risks
+## OpenClaw Security Risk Analysis
 
-When deploying OpenClaw on Linux, you face these specific security risks:
+Based on OpenClaw **source code audit** + **internet security research** (ClawHavoc attack, TIP hijacking, 1800+ exposed instances), 10 risk categories identified:
 
-| Risk | Description | Severity | Hardening Item |
-|------|-------------|----------|----------------|
-| **Service runs with high privileges** | Service runs as root or privileged user | High | 1, 4 |
-| **Config/Secret leakage** | config.yaml, Token exposed | High | 2, 3 |
-| **Gateway port exposure** | Port 18789 accessible externally | High | 5 |
-| **Agent file traversal** | AI Agent accesses /etc, /root, etc. | High | 6 |
-| **No operation audit** | Agent operations not logged | Medium | 7 |
-| **SSRF attacks** | Agent accesses internal network resources | High | 8 |
-| **Resource exhaustion** | Malicious prompts exhaust CPU/memory | Medium | 9 |
-| **Bash command injection** | Agent executes dangerous system commands | High | 10 |
+| ID | Risk | Source | Description | Severity |
+|----|------|--------|-------------|----------|
+| R1 | Gateway Exposure | Research | 1800+ instances leaking API keys | **Critical** |
+| R2 | Prompt/Command Injection | Code+Research | Agent shell access + TIP hijacking | **Critical** |
+| R3 | MCP Tool Poisoning | ClawHavoc | 341 malicious skills stealing creds | **Critical** |
+| R4 | SSRF Attacks | Code | Agent accessing internal resources | High |
+| R5 | Credential Leakage | Research | Token/API Key/chat history exposed | **Critical** |
+| R6 | Privilege Escalation | Code | Elevated tools + env var injection | High |
+| R7 | File System Traversal | Code | Path traversal/symlink attacks | High |
+| R8 | Resource Exhaustion | General | Fork bombs/memory exhaustion | Medium |
+| R9 | Supply Chain Attack | ClawHavoc | Malicious ClawHub skill packages | **Critical** |
+| R10 | Log/Data Leakage | Code | Sensitive info written to logs | Medium |
 
-## Hardening Items
+> References: [ClawHavoc](https://thehackernews.com/2026/02/researchers-find-341-malicious-clawhub.html) | [OpenClaw Security Model](https://venturebeat.com/security/openclaw-agentic-ai-security-risk-ciso-guide) | [TIP Hijacking](https://www.secrss.com/articles/83397)
 
-| # | Item | Target Risk | Linux-Specific Measure |
-|---|------|-------------|------------------------|
-| 1 | Create service account | High privileges | nologin account, no sudo |
-| 2 | Configure file permissions | Config leakage | 640/750 permissions |
-| 3 | Generate secure config | Secret leakage | Token generation, env isolation |
-| 4 | Install systemd service | High privileges | **Process sandbox** (see below) |
-| 5 | Configure firewall | Port exposure | UFW/firewalld/iptables |
-| 6 | Configure AppArmor/SELinux | File traversal | **Mandatory Access Control** |
-| 7 | Enable audit policy | No audit | **auditd** |
-| 8 | Network outbound whitelist | SSRF | **iptables outbound rules** |
-| 9 | Resource limits | Exhaustion | **cgroup** |
-| 10 | Bash Tool restrictions | Injection | **Command/path whitelist** |
+## Hardening Items (12 items)
 
-## Linux-Specific Hardening Details
+| # | Item | Risks | Linux Measure |
+|---|------|-------|---------------|
+| 1 | Gateway Bind Hardening | R1 | Loopback enforcement + periodic check |
+| 2 | Service Account Isolation | R5 | nologin + no sudo |
+| 3 | File Permission Hardening | R5/R7 | 640/700 + symlink protection |
+| 4 | Credential Security | R5 | Token + env var filtering |
+| 5 | systemd Process Sandbox | R2/R6/R8 | seccomp + capabilities + cgroup |
+| 6 | Firewall Port Restriction | R1 | UFW/firewalld/iptables |
+| 7 | Network Outbound Whitelist | R4 | iptables outbound rules |
+| 8 | AppArmor/SELinux | R7/R6 | Mandatory Access Control |
+| 9 | Bash Tool Restrictions | R2/R6 | Command blacklist + restricted shell |
+| 10 | Resource Limits | R8 | PAM limits |
+| 11 | **MCP/Skill Protection** | R9/R3 | Skill audit + integrity check |
+| 12 | **Log Audit & Redaction** | R10/R5 | auditd + logrotate + redaction |
 
-### [4] systemd Process Sandbox
+## Hardening Details
 
-Linux systemd provides rich process sandboxing capabilities not available in Windows service management:
+### [5] systemd Process Sandbox
+
+Service isolation through systemd process sandboxing:
 
 ```ini
 [Service]
@@ -86,9 +102,7 @@ CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 MemoryDenyWriteExecute=true
 ```
 
-**Windows comparison:** Windows services require AppLocker + NTFS ACL + service account permissions combined to achieve similar isolation.
-
-### [6] AppArmor/SELinux Access Control
+### [8] AppArmor/SELinux Access Control
 
 Restrict OpenClaw process to specific directories only:
 
@@ -109,9 +123,7 @@ profile openclaw {
 }
 ```
 
-**Windows comparison:** Windows uses AppLocker for similar functionality, but focuses mainly on executable control rather than fine-grained directory access.
-
-### [8] Network Outbound Whitelist (SSRF Protection)
+### [7] Network Outbound Whitelist (SSRF Protection)
 
 Restrict OpenClaw to only connect to specified AI APIs:
 
@@ -125,7 +137,7 @@ generativelanguage.googleapis.com
 
 The script automatically resolves these domain IPs and configures firewall rules.
 
-### [9] cgroup Resource Limits
+### [10] cgroup Resource Limits
 
 Prevent malicious prompts from exhausting resources:
 
@@ -143,9 +155,7 @@ TasksMax=100
 LimitNOFILE=4096
 ```
 
-**Windows comparison:** Windows requires Job Objects or WSL2 for similar resource isolation.
-
-### [10] Bash Tool Command Restrictions
+### [9] Bash Tool Command Restrictions
 
 Prevent AI Agent from executing dangerous commands:
 
@@ -302,6 +312,23 @@ ALLOWED_WORK_DIRS=(
 | Resource limits configured | `ls /etc/systemd/system/openclaw.service.d/` | exists |
 
 ## Changelog
+
+### v1.2.0 (2026-02-09)
+- Added: Environment adaptability detection framework, auto-detect all dependencies at startup
+- Added: Environment pre-check report shown in main menu with component availability status
+- Added: Pre-requisite checks for every apply/rollback function, smart skip when components missing
+- Added: Python3 fallback - state management degrades to text file when Python3 unavailable
+- Added: `generate_token()` multi-fallback (urandom → openssl → sha256)
+- Improved: `do_apply_1` detects ss/netstat fallback, skips timer on non-systemd systems
+- Improved: `do_apply_2` checks useradd availability, nologin shell path auto-adaptation
+- Improved: `do_apply_5` checks systemd + service account existence
+- Improved: `do_apply_6` full firewall chain check (command + service status + rule persistence)
+- Improved: `do_apply_7` dig + firewall dual check, individual domain resolve failures handled
+- Improved: `do_apply_8` AppArmor/SELinux deep check (enabled state + parser tools)
+- Improved: `do_apply_10` PAM limits directory existence check
+- Improved: `do_apply_12` auditd/redaction/logrotate three-stage independent degradation
+- Fixed: Removed `set -e` to prevent detection failures from crashing the script
+- Fixed: auditd detection operator precedence bug
 
 ### v1.1.0 (2026-02-06)
 - Redesigned: Focus on OpenClaw deployment risks
