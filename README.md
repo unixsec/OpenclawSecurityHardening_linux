@@ -13,9 +13,20 @@ This script focuses on addressing **security risks specific to OpenClaw deployme
 |------|-------------|
 | **Author** | Alex |
 | **Email** | unix_sec@163.com |
-| **Version** | 1.2.0 |
+| **Version** | 1.3.0 |
 
-## v1.2 New Features (Environment Adaptability)
+## v1.3 New Features
+
+| Feature | Description |
+|---------|-------------|
+| **One-click Rollback** | Rollback all/pre-deployment/post-deployment hardening items in reverse order |
+| **Phase-based Rollback** | New menu options `[R] Rollback pre-deployment` and `[T] Rollback post-deployment` |
+| **Execution Report** | Detailed report after every batch apply/rollback (success/skipped/failed statistics) |
+| **CLI Batch Rollback** | New `--rollback-all`, `--rollback-pre`, `--rollback-post` CLI arguments |
+| **CLI Report Output** | Report summary also output for `--apply`/`--pre`/`--post`/`--rollback` CLI usage |
+| **Result Tracking** | `apply_item`/`rollback_item` automatically track results (success/skipped/failed) |
+
+## v1.2 Features (Environment Adaptability)
 
 | Feature | Description |
 |---------|-------------|
@@ -51,8 +62,6 @@ Based on OpenClaw **source code audit** + **internet security research** (ClawHa
 | R8 | Resource Exhaustion | General | Fork bombs/memory exhaustion | Medium |
 | R9 | Supply Chain Attack | ClawHavoc | Malicious ClawHub skill packages | **Critical** |
 | R10 | Log/Data Leakage | Code | Sensitive info written to logs | Medium |
-
-> References: [ClawHavoc](https://thehackernews.com/2026/02/researchers-find-341-malicious-clawhub.html) | [OpenClaw Security Model](https://venturebeat.com/security/openclaw-agentic-ai-security-risk-ciso-guide) | [TIP Hijacking](https://www.secrss.com/articles/83397)
 
 ## Hardening Items (12 items)
 
@@ -199,7 +208,10 @@ sudo ./linux-security-hardening.sh --status
 # 6. Rollback specific item
 sudo ./linux-security-hardening.sh --rollback 5
 
-# 7. Debug specific item
+# 7. One-click rollback all
+sudo ./linux-security-hardening.sh --rollback-all
+
+# 8. Debug specific item
 sudo ./linux-security-hardening.sh --debug 3
 ```
 
@@ -210,10 +222,15 @@ sudo ./linux-security-hardening.sh --debug 3
 | `--help` | Show help | `./script.sh --help` |
 | `--dry-run` | Dry run mode | `./script.sh --dry-run` |
 | `--status` | Show status | `./script.sh --status` |
-| `--rollback N` | Rollback item N | `./script.sh --rollback 5` |
-| `--debug N` | Debug item N | `./script.sh --debug 3` |
 | `--apply N` | Apply item N | `./script.sh --apply 1` |
 | `--all` | Apply all items | `./script.sh --all` |
+| `--pre` | Pre-deployment hardening only | `./script.sh --pre` |
+| `--post` | Post-deployment hardening only | `./script.sh --post` |
+| `--rollback N` | Rollback item N | `./script.sh --rollback 5` |
+| `--rollback-all` | Rollback all hardening items | `./script.sh --rollback-all` |
+| `--rollback-pre` | Rollback pre-deployment items | `./script.sh --rollback-pre` |
+| `--rollback-post` | Rollback post-deployment items | `./script.sh --rollback-post` |
+| `--debug N` | Debug item N | `./script.sh --debug 3` |
 
 ## Interactive Menu
 
@@ -221,11 +238,15 @@ sudo ./linux-security-hardening.sh --debug 3
 |--------|----------|
 | 1 | Interactive item selection |
 | 2 | One-click full hardening |
-| 3 | View hardening status |
-| 4 | Rollback specific item |
-| 5 | Debug specific item |
-| 6 | View logs |
-| 7 | Rollback all |
+| 3 | Pre-deployment hardening |
+| 4 | Post-deployment hardening |
+| 5 | Rollback specific item |
+| 6 | One-click rollback all |
+| 7 | Debug mode |
+| 8 | View logs |
+| 9 | View status |
+| R | Rollback pre-deployment items |
+| T | Rollback post-deployment items |
 
 ## Idempotency
 
@@ -312,6 +333,16 @@ ALLOWED_WORK_DIRS=(
 | Resource limits configured | `ls /etc/systemd/system/openclaw.service.d/` | exists |
 
 ## Changelog
+
+### v1.3.0 (2026-02-10)
+- Added: One-click rollback for all/pre-deployment/post-deployment hardening items
+- Added: Execution report summary after every batch operation (success/skipped/failed details)
+- Added: `rollback_phase()` for phase-based rollback in reverse order
+- Added: `reset_report()`/`print_report()` report counter and output functions
+- Added: CLI arguments `--rollback-all`, `--rollback-pre`, `--rollback-post`
+- Improved: `apply_item()`/`rollback_item()` automatically track execution results
+- Improved: Main menu with `[R]` rollback pre-deployment, `[T]` rollback post-deployment options
+- Improved: Interactive select, one-click, and CLI execution all output report summary
 
 ### v1.2.0 (2026-02-09)
 - Added: Environment adaptability detection framework, auto-detect all dependencies at startup

@@ -13,9 +13,20 @@
 |------|------|
 | **作者** | Alex |
 | **邮箱** | unix_sec@163.com |
-| **版本** | 1.2.0 |
+| **版本** | 1.3.0 |
 
-## v1.2 新增功能 (环境适配性)
+## v1.3 新增功能
+
+| 功能 | 说明 |
+|------|------|
+| **一键回退加固** | 支持一键回退全部/部署前/部署后加固项，按倒序安全回退 |
+| **分阶段回退** | 主菜单新增 `[R] 回退部署前加固` 和 `[T] 回退部署后加固` 选项 |
+| **执行报告总结** | 每次批量加固/回退操作完成后自动输出详细报告（成功/跳过/失败统计） |
+| **命令行批量回退** | 新增 `--rollback-all`、`--rollback-pre`、`--rollback-post` 命令行参数 |
+| **命令行报告输出** | 命令行执行 `--apply`/`--pre`/`--post`/`--rollback` 时也输出报告总结 |
+| **结果追踪** | `apply_item`/`rollback_item` 自动追踪执行结果，区分成功/跳过/失败 |
+
+## v1.2 功能 (环境适配性)
 
 | 功能 | 说明 |
 |------|------|
@@ -51,8 +62,6 @@
 | R8 | 资源耗尽 | 通用 | Fork 炸弹/内存耗尽 | 中 |
 | R9 | 供应链攻击 | ClawHavoc | ClawHub 恶意技能包 | **严重** |
 | R10 | 日志/数据泄露 | 源码 | 敏感信息写入日志 | 中 |
-
-> 参考: [ClawHavoc 攻击](https://thehackernews.com/2026/02/researchers-find-341-malicious-clawhub.html) | [OpenClaw 安全模型缺陷](https://venturebeat.com/security/openclaw-agentic-ai-security-risk-ciso-guide) | [TIP 劫持漏洞](https://www.secrss.com/articles/83397)
 
 ## 加固项列表 (12 项)
 
@@ -199,7 +208,10 @@ sudo ./linux-security-hardening.sh --status
 # 6. 回退指定加固项
 sudo ./linux-security-hardening.sh --rollback 5
 
-# 7. 调试指定加固项
+# 7. 一键回退全部加固项
+sudo ./linux-security-hardening.sh --rollback-all
+
+# 8. 调试指定加固项
 sudo ./linux-security-hardening.sh --debug 3
 ```
 
@@ -210,10 +222,15 @@ sudo ./linux-security-hardening.sh --debug 3
 | `--help` | 显示帮助信息 | `./script.sh --help` |
 | `--dry-run` | 模拟运行 | `./script.sh --dry-run` |
 | `--status` | 查看加固状态 | `./script.sh --status` |
-| `--rollback N` | 回退加固项 N | `./script.sh --rollback 5` |
-| `--debug N` | 调试加固项 N | `./script.sh --debug 3` |
 | `--apply N` | 应用加固项 N | `./script.sh --apply 1` |
 | `--all` | 一键应用所有 | `./script.sh --all` |
+| `--pre` | 仅执行部署前加固 | `./script.sh --pre` |
+| `--post` | 仅执行部署后加固 | `./script.sh --post` |
+| `--rollback N` | 回退加固项 N | `./script.sh --rollback 5` |
+| `--rollback-all` | 一键回退全部加固项 | `./script.sh --rollback-all` |
+| `--rollback-pre` | 一键回退部署前加固项 | `./script.sh --rollback-pre` |
+| `--rollback-post` | 一键回退部署后加固项 | `./script.sh --rollback-post` |
+| `--debug N` | 调试加固项 N | `./script.sh --debug 3` |
 
 ## 交互式菜单
 
@@ -221,11 +238,15 @@ sudo ./linux-security-hardening.sh --debug 3
 |------|------|
 | 1 | 交互式选择加固项 |
 | 2 | 一键完整加固 |
-| 3 | 查看加固状态 |
-| 4 | 回退指定加固项 |
-| 5 | 调试指定加固项 |
-| 6 | 查看日志 |
-| 7 | 全部回退 |
+| 3 | 部署前加固 |
+| 4 | 部署后加固 |
+| 5 | 回退指定项 |
+| 6 | 一键全部回退 |
+| 7 | 调试模式 |
+| 8 | 查看日志 |
+| 9 | 查看状态 |
+| R | 回退部署前加固 |
+| T | 回退部署后加固 |
 
 ## 幂等性说明
 
@@ -312,6 +333,16 @@ ALLOWED_WORK_DIRS=(
 | 资源限制配置 | `ls /etc/systemd/system/openclaw.service.d/` | 存在 |
 
 ## 更新日志
+
+### v1.3.0 (2026-02-10)
+- 新增: 一键回退加固功能，支持全部/部署前/部署后分阶段回退
+- 新增: 执行报告总结，每次批量操作后输出成功/跳过/失败明细
+- 新增: `rollback_phase()` 分阶段回退函数，按倒序安全回退
+- 新增: `reset_report()`/`print_report()` 报告计数器与输出函数
+- 新增: 命令行 `--rollback-all`、`--rollback-pre`、`--rollback-post` 参数
+- 优化: `apply_item()`/`rollback_item()` 自动追踪执行结果
+- 优化: 主菜单新增 `[R]` 回退部署前、`[T]` 回退部署后选项
+- 优化: 交互式选择、一键加固、命令行执行均输出报告总结
 
 ### v1.2.0 (2026-02-09)
 - 新增: 环境适配性检测框架，启动时自动检测所有依赖组件

@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================================================
 # OpenClaw Linux 安全加固脚本
-# 版本: 1.2
+# 版本: 1.3
 # 作者: Alex
 # 邮箱: unix_sec@163.com
 # 许可证: Apache License 2.0
@@ -110,6 +110,31 @@ declare -A ITEM_NAMES=(
     [11]="[R9][R3] MCP/Skill 供应链防护"
     [12]="[R10][R5] 日志审计与脱敏"
 )
+
+# 阶段标记: PRE=部署前, POST=部署后
+declare -A ITEM_PHASE=(
+    [1]="POST"     # Gateway 绑定 — 需要已安装的 config.yaml
+    [2]="PRE"      # 服务账户 — 部署前创建
+    [3]="PRE"      # 文件权限 — 部署前准备目录结构
+    [4]="POST"     # 凭证管理 — 为已安装服务生成 Token/配置
+    [5]="POST"     # systemd 沙箱 — 需要已安装的二进制文件
+    [6]="PRE"      # 防火墙 — 部署前锁定端口
+    [7]="PRE"      # 出站白名单 — 部署前限制网络
+    [8]="POST"     # AppArmor/SELinux — 需要已安装的路径
+    [9]="POST"     # Bash Tool 限制 — 为运行中服务配置
+    [10]="PRE"     # 资源限制 — 部署前设置
+    [11]="POST"    # MCP/Skill 防护 — 为运行中服务配置
+    [12]="POST"    # 日志审计 — 监控运行中服务
+)
+
+declare -A PHASE_LABEL=(
+    [PRE]="部署前"
+    [POST]="部署后"
+)
+
+# 阶段顺序 (部署前项优先)
+PRE_ITEMS=(2 3 6 7 10)
+POST_ITEMS=(1 4 5 8 9 11 12)
 
 declare -A ITEM_RISKS=(
     [1]="1800+ 实例暴露 API Key，攻击者可获取完整访问权限"
@@ -1394,21 +1419,111 @@ do_rollback_12() {
 }
 
 # ============================================================================
-# 加固/回退调度
+# 报告总结
+# ============================================================================
+
+# 全局计数器 (每次批量操作前重置)
+REPORT_SUCCESS=0
+REPORT_SKIPPED=0
+REPORT_FAILED=0
+declare -a REPORT_ITEMS_OK=()
+declare -a REPORT_ITEMS_SKIP=()
+declare -a REPORT_ITEMS_FAIL=()
+
+reset_report() {
+    REPORT_SUCCESS=0; REPORT_SKIPPED=0; REPORT_FAILED=0
+    REPORT_ITEMS_OK=(); REPORT_ITEMS_SKIP=(); REPORT_ITEMS_FAIL=()
+}
+
+print_report() {
+    local action=${1:-"加固"}
+    local total=$((REPORT_SUCCESS + REPORT_SKIPPED + REPORT_FAILED))
+    
+    echo ""
+    echo -e "${CYAN}╔══════════════════════════════════════════════════════╗${RESET}"
+    echo -e "${CYAN}║              ${action}执行报告                              ║${RESET}"
+    echo -e "${CYAN}╠══════════════════════════════════════════════════════╣${RESET}"
+    echo -e "${CYAN}║${RESET}  执行时间: $(date '+%Y-%m-%d %H:%M:%S')"
+    echo -e "${CYAN}║${RESET}  运行模式: $([ "$DRY_RUN" -eq 1 ] && echo '模拟运行' || echo '实际执行')"
+    echo -e "${CYAN}║${RESET}  总计: ${WHITE}$total${RESET} 项"
+    echo -e "${CYAN}║${RESET}  ${GREEN}成功: $REPORT_SUCCESS${RESET}  ${YELLOW}跳过: $REPORT_SKIPPED${RESET}  ${RED}失败: $REPORT_FAILED${RESET}"
+    echo -e "${CYAN}╠══════════════════════════════════════════════════════╣${RESET}"
+    
+    if [ ${#REPORT_ITEMS_OK[@]} -gt 0 ]; then
+        echo -e "${CYAN}║${RESET} ${GREEN}成功项:${RESET}"
+        for desc in "${REPORT_ITEMS_OK[@]}"; do
+            echo -e "${CYAN}║${RESET}   ${GREEN}✓${RESET} $desc"
+        done
+    fi
+    if [ ${#REPORT_ITEMS_SKIP[@]} -gt 0 ]; then
+        echo -e "${CYAN}║${RESET} ${YELLOW}跳过项:${RESET}"
+        for desc in "${REPORT_ITEMS_SKIP[@]}"; do
+            echo -e "${CYAN}║${RESET}   ${YELLOW}○${RESET} $desc"
+        done
+    fi
+    if [ ${#REPORT_ITEMS_FAIL[@]} -gt 0 ]; then
+        echo -e "${CYAN}║${RESET} ${RED}失败项:${RESET}"
+        for desc in "${REPORT_ITEMS_FAIL[@]}"; do
+            echo -e "${CYAN}║${RESET}   ${RED}✗${RESET} $desc"
+        done
+    fi
+    
+    echo -e "${CYAN}╠══════════════════════════════════════════════════════╣${RESET}"
+    echo -e "${CYAN}║${RESET}  日志: $LOG_FILE"
+    echo -e "${CYAN}║${RESET}  状态: $STATE_FILE"
+    echo -e "${CYAN}╚══════════════════════════════════════════════════════╝${RESET}"
+    
+    log_info "报告: $action 总计=$total 成功=$REPORT_SUCCESS 跳过=$REPORT_SKIPPED 失败=$REPORT_FAILED"
+}
+
+# ============================================================================
+# 加固/回退调度 (带结果追踪)
 # ============================================================================
 
 apply_item() {
     local item=$1
+    local before_state=$(get_item_state "$item")
     log_info "执行加固项 $item: ${ITEM_NAMES[$item]}"
-    "do_apply_$item"
-    [ "$DRY_RUN" -eq 0 ] && set_item_state "$item" "applied"
+    
+    # 捕获输出判断是否跳过
+    local output
+    output=$("do_apply_$item" 2>&1)
+    local rc=$?
+    echo "$output"
+    
+    if echo "$output" | grep -q '\[跳过\]'; then
+        ((REPORT_SKIPPED++))
+        REPORT_ITEMS_SKIP+=("[$item] ${ITEM_NAMES[$item]}")
+    elif [ $rc -ne 0 ] || echo "$output" | grep -q '\[失败\]'; then
+        ((REPORT_FAILED++))
+        REPORT_ITEMS_FAIL+=("[$item] ${ITEM_NAMES[$item]}")
+    else
+        ((REPORT_SUCCESS++))
+        REPORT_ITEMS_OK+=("[$item] ${ITEM_NAMES[$item]}")
+        [ "$DRY_RUN" -eq 0 ] && set_item_state "$item" "applied"
+    fi
 }
 
 rollback_item() {
     local item=$1
     echo -e "  ${YELLOW}回退加固项 $item: ${ITEM_NAMES[$item]}${RESET}"
-    "do_rollback_$item"
-    [ "$DRY_RUN" -eq 0 ] && clear_item_state "$item"
+    
+    local output
+    output=$("do_rollback_$item" 2>&1)
+    local rc=$?
+    echo "$output"
+    
+    if echo "$output" | grep -q '\[跳过\]'; then
+        ((REPORT_SKIPPED++))
+        REPORT_ITEMS_SKIP+=("[$item] ${ITEM_NAMES[$item]}")
+    elif [ $rc -ne 0 ]; then
+        ((REPORT_FAILED++))
+        REPORT_ITEMS_FAIL+=("[$item] ${ITEM_NAMES[$item]}")
+    else
+        ((REPORT_SUCCESS++))
+        REPORT_ITEMS_OK+=("[$item] ${ITEM_NAMES[$item]}")
+        [ "$DRY_RUN" -eq 0 ] && clear_item_state "$item"
+    fi
 }
 
 # ============================================================================
@@ -1444,7 +1559,7 @@ debug_item() {
 print_header() {
     clear
     echo -e "${CYAN}============================================================${RESET}"
-    echo -e "${CYAN}    OpenClaw Linux 安全加固脚本 v1.2${RESET}"
+    echo -e "${CYAN}    OpenClaw Linux 安全加固脚本 v1.3${RESET}"
     echo -e "${CYAN}    覆盖 10 类安全风险 / 12 项加固措施${RESET}"
     echo -e "${CYAN}============================================================${RESET}"
     [ "$DRY_RUN" -eq 1 ] && echo -e "${YELLOW}                [模拟运行]${RESET}"
@@ -1454,7 +1569,13 @@ print_header() {
 show_status() {
     echo ""
     echo -e "${CYAN}======== 加固状态 ========${RESET}"
-    for i in {1..12}; do
+    echo -e "${WHITE}  ── 部署前 (安装 OpenClaw 之前执行) ──${RESET}"
+    for i in "${PRE_ITEMS[@]}"; do
+        local st=$(get_item_state "$i")
+        [ "$st" = "applied" ] && echo -e "  ${GREEN}[√]${RESET} [$i] ${ITEM_NAMES[$i]}" || echo -e "  [ ] [$i] ${ITEM_NAMES[$i]}"
+    done
+    echo -e "${WHITE}  ── 部署后 (安装 OpenClaw 之后执行) ──${RESET}"
+    for i in "${POST_ITEMS[@]}"; do
         local st=$(get_item_state "$i")
         [ "$st" = "applied" ] && echo -e "  ${GREEN}[√]${RESET} [$i] ${ITEM_NAMES[$i]}" || echo -e "  [ ] [$i] ${ITEM_NAMES[$i]}"
     done
@@ -1469,15 +1590,32 @@ main_menu() {
     echo -e "  R5 凭证泄露    R6 权限提升  R7 文件越界  R8 资源耗尽"
     echo -e "  R9 供应链攻击  R10 日志泄露"
     echo ""
-    echo -e "  ${CYAN}[1]${RESET} 交互式选择     ${CYAN}[5]${RESET} 调试模式"
-    echo -e "  ${CYAN}[2]${RESET} 一键完整加固   ${CYAN}[6]${RESET} 查看日志"
-    echo -e "  ${CYAN}[3]${RESET} 查看状态       ${CYAN}[7]${RESET} 全部回退"
-    echo -e "  ${CYAN}[4]${RESET} 回退指定项     ${CYAN}[0]${RESET} 退出"
+    echo -e "  ${WHITE}── 加固 ──${RESET}                    ${WHITE}── 管理 ──${RESET}"
+    echo -e "  ${CYAN}[1]${RESET} 交互式选择          ${CYAN}[7]${RESET} 调试模式"
+    echo -e "  ${CYAN}[2]${RESET} 一键完整加固        ${CYAN}[8]${RESET} 查看日志"
+    echo -e "  ${CYAN}[3]${RESET} ${YELLOW}部署前加固${RESET} (${#PRE_ITEMS[@]}项)     ${CYAN}[9]${RESET} 查看状态"
+    echo -e "  ${CYAN}[4]${RESET} ${YELLOW}部署后加固${RESET} (${#POST_ITEMS[@]}项)"
+    echo -e "  ${WHITE}── 回退 ──${RESET}                    ${CYAN}[0]${RESET} 退出"
+    echo -e "  ${CYAN}[5]${RESET} 回退指定项"
+    echo -e "  ${CYAN}[6]${RESET} 一键全部回退"
+    echo -e "  ${CYAN}[R]${RESET} 回退部署前加固"
+    echo -e "  ${CYAN}[T]${RESET} 回退部署后加固"
     echo ""
-    read -p "选项 [0-7]: " c
-    case $c in
-        1) interactive_select ;; 2) one_click ;; 3) show_status; read -p "Enter..."; main_menu ;;
-        4) rollback_menu ;; 5) debug_menu ;; 6) view_logs ;; 7) rollback_all ;; 0) exit_s ;; *) main_menu ;;
+    read -p "选项: " c
+    case "${c^^}" in
+        1) interactive_select ;;
+        2) one_click "ALL" ;;
+        3) one_click "PRE" ;;
+        4) one_click "POST" ;;
+        5) rollback_menu ;;
+        6) rollback_all ;;
+        7) debug_menu ;;
+        8) view_logs ;;
+        9) show_status; read -p "Enter..."; main_menu ;;
+        R) rollback_phase "PRE" ;;
+        T) rollback_phase "POST" ;;
+        0) exit_s ;;
+        *) main_menu ;;
     esac
 }
 
@@ -1485,21 +1623,32 @@ interactive_select() {
     declare -A SEL; for i in {1..12}; do SEL[$i]=0; done
     while true; do
         print_header
-        for i in {1..12}; do
+        echo -e "${WHITE}  ── 部署前 (安装 OpenClaw 之前) ──${RESET}"
+        for i in "${PRE_ITEMS[@]}"; do
+            local st=$(get_item_state "$i"); local si=""; [ "$st" = "applied" ] && si="${GREEN}[已加固]${RESET} "
+            [ "${SEL[$i]}" -eq 1 ] && echo -e "  ${GREEN}[√]${RESET} [$i] $si${ITEM_NAMES[$i]}" || echo -e "  [ ] [$i] $si${ITEM_NAMES[$i]}"
+        done
+        echo -e "${WHITE}  ── 部署后 (安装 OpenClaw 之后) ──${RESET}"
+        for i in "${POST_ITEMS[@]}"; do
             local st=$(get_item_state "$i"); local si=""; [ "$st" = "applied" ] && si="${GREEN}[已加固]${RESET} "
             [ "${SEL[$i]}" -eq 1 ] && echo -e "  ${GREEN}[√]${RESET} [$i] $si${ITEM_NAMES[$i]}" || echo -e "  [ ] [$i] $si${ITEM_NAMES[$i]}"
         done
         echo ""
-        echo -e "  ${CYAN}[A]${RESET} 全选  ${CYAN}[N]${RESET} 清空  ${CYAN}[E]${RESET} 执行  ${CYAN}[B]${RESET} 返回"
+        echo -e "  ${CYAN}[A]${RESET} 全选  ${CYAN}[P]${RESET} 选部署前  ${CYAN}[D]${RESET} 选部署后  ${CYAN}[N]${RESET} 清空  ${CYAN}[E]${RESET} 执行  ${CYAN}[B]${RESET} 返回"
         read -p "输入: " inp
         case "${inp^^}" in
-            A) for i in {1..12}; do SEL[$i]=1; done ;; N) for i in {1..12}; do SEL[$i]=0; done ;;
+            A) for i in {1..12}; do SEL[$i]=1; done ;;
+            P) for i in "${PRE_ITEMS[@]}"; do SEL[$i]=1; done ;;
+            D) for i in "${POST_ITEMS[@]}"; do SEL[$i]=1; done ;;
+            N) for i in {1..12}; do SEL[$i]=0; done ;;
             B) main_menu; return ;;
             E)
                 local cnt=0; for i in {1..12}; do [ "${SEL[$i]}" -eq 1 ] && ((cnt++)); done
                 [ $cnt -eq 0 ] && { echo "请选择"; sleep 1; continue; }
+                reset_report
                 for i in {1..12}; do [ "${SEL[$i]}" -eq 1 ] && { echo ""; echo -e "${CYAN}[$i] ${ITEM_NAMES[$i]}${RESET}"; apply_item "$i"; }; done
-                echo -e "\n${GREEN}完成 $cnt 项${RESET}"; read -p "Enter..."; main_menu; return ;;
+                print_report "加固"
+                read -p "Enter..."; main_menu; return ;;
             *)
                 for ((j=0; j<${#inp}; j++)); do
                     c="${inp:$j:1}"
@@ -1516,31 +1665,120 @@ interactive_select() {
 }
 
 one_click() {
-    print_header; echo "一键完整加固 (12项)"; read -p "确认? [Y/N]: " c
+    local phase=${1:-ALL}
+    local items=() label=""
+    case $phase in
+        PRE)  items=("${PRE_ITEMS[@]}");  label="部署前加固 (${#PRE_ITEMS[@]}项: 服务账户/权限/防火墙/网络/资源限制)" ;;
+        POST) items=("${POST_ITEMS[@]}"); label="部署后加固 (${#POST_ITEMS[@]}项: Gateway/凭证/沙箱/MAC/命令限制/供应链/日志)" ;;
+        ALL)  items=(${PRE_ITEMS[@]} ${POST_ITEMS[@]}); label="完整加固 (12项, 先执行部署前 → 再执行部署后)" ;;
+    esac
+    local total=${#items[@]}
+    
+    print_header
+    echo -e "${WHITE}$label${RESET}"
+    echo ""
+    for i in "${items[@]}"; do
+        echo -e "  [$i] [${YELLOW}${PHASE_LABEL[${ITEM_PHASE[$i]}]}${RESET}] ${ITEM_NAMES[$i]}"
+    done
+    echo ""
+    read -p "确认执行? [Y/N]: " c
     [[ ! "${c^^}" =~ ^Y ]] && { main_menu; return; }
-    for i in {1..12}; do echo ""; echo -e "${CYAN}[$i/12] ${ITEM_NAMES[$i]}${RESET}"; apply_item "$i"; done
-    echo -e "\n${GREEN}完成！${RESET}"; read -p "Enter..."; main_menu
+    
+    reset_report
+    local n=0
+    for i in "${items[@]}"; do
+        ((n++))
+        echo ""
+        echo -e "${CYAN}[$n/$total] [${PHASE_LABEL[${ITEM_PHASE[$i]}]}] ${ITEM_NAMES[$i]}${RESET}"
+        apply_item "$i"
+    done
+    print_report "加固"
+    read -p "Enter..."; main_menu
 }
 
 rollback_menu() {
     print_header; show_status; echo -e "  ${CYAN}[B]${RESET} 返回"
     read -p "回退编号 (1-12): " it
     [ "$it" = "B" ] || [ "$it" = "b" ] && { main_menu; return; }
-    [[ "$it" =~ ^[0-9]+$ ]] && [ "$it" -ge 1 ] && [ "$it" -le 12 ] && { read -p "确认? [Y/N]: " c; [[ "${c^^}" =~ ^Y ]] && rollback_item "$it"; }
+    if [[ "$it" =~ ^[0-9]+$ ]] && [ "$it" -ge 1 ] && [ "$it" -le 12 ]; then
+        read -p "确认? [Y/N]: " c
+        if [[ "${c^^}" =~ ^Y ]]; then
+            reset_report
+            rollback_item "$it"
+            print_report "回退"
+        fi
+    fi
     read -p "Enter..."; rollback_menu
 }
 
-rollback_all() {
-    read -p "输入 CONFIRM 确认全部回退: " c; [ "$c" != "CONFIRM" ] && { main_menu; return; }
-    for i in 12 11 10 9 8 7 6 5 4 3 2 1; do
-        [ "$(get_item_state $i)" = "applied" ] && rollback_item "$i"
+rollback_phase() {
+    local phase=$1
+    local items=() label=""
+    case $phase in
+        PRE)  label="部署前加固项"; for i in "${PRE_ITEMS[@]}"; do items+=("$i"); done ;;
+        POST) label="部署后加固项"; for i in "${POST_ITEMS[@]}"; do items+=("$i"); done ;;
+        ALL)  label="全部加固项"; items=(12 11 10 9 8 7 6 5 4 3 2 1) ;;
+    esac
+    
+    # 统计已加固项
+    local applied_count=0
+    for i in "${items[@]}"; do
+        [ "$(get_item_state $i)" = "applied" ] && ((applied_count++))
     done
-    echo -e "${GREEN}全部回退完成${RESET}"; read -p "Enter..."; main_menu
+    
+    if [ $applied_count -eq 0 ]; then
+        echo -e "${YELLOW}没有已加固的${label}需要回退${RESET}"
+        read -p "Enter..."; main_menu; return
+    fi
+    
+    print_header
+    echo -e "${WHITE}一键回退: $label (已加固 $applied_count 项)${RESET}"
+    echo ""
+    for i in "${items[@]}"; do
+        local st=$(get_item_state "$i")
+        [ "$st" = "applied" ] && echo -e "  ${GREEN}[√]${RESET} [$i] ${ITEM_NAMES[$i]}" || echo -e "  ${YELLOW}[−]${RESET} [$i] ${ITEM_NAMES[$i]} (未加固, 跳过)"
+    done
+    echo ""
+    
+    if [ "$phase" = "ALL" ]; then
+        read -p "输入 CONFIRM 确认全部回退: " c
+        [ "$c" != "CONFIRM" ] && { main_menu; return; }
+    else
+        read -p "确认回退 $label? [Y/N]: " c
+        [[ ! "${c^^}" =~ ^Y ]] && { main_menu; return; }
+    fi
+    
+    reset_report
+    # 按倒序回退（后部署的先回退）
+    local rev_items=()
+    for ((idx=${#items[@]}-1; idx>=0; idx--)); do
+        rev_items+=("${items[$idx]}")
+    done
+    
+    for i in "${rev_items[@]}"; do
+        if [ "$(get_item_state $i)" = "applied" ]; then
+            echo ""
+            echo -e "${YELLOW}回退 [$i] ${ITEM_NAMES[$i]}${RESET}"
+            rollback_item "$i"
+        else
+            ((REPORT_SKIPPED++))
+            REPORT_ITEMS_SKIP+=("[$i] ${ITEM_NAMES[$i]} (未加固)")
+        fi
+    done
+    print_report "回退"
+    read -p "Enter..."; main_menu
+}
+
+rollback_all() {
+    rollback_phase "ALL"
 }
 
 debug_menu() {
     print_header
-    for i in {1..12}; do echo "  [$i] [$(get_item_state $i)] ${ITEM_NAMES[$i]}"; done
+    echo -e "${WHITE}  ── 部署前 ──${RESET}"
+    for i in "${PRE_ITEMS[@]}"; do echo "  [$i] [$(get_item_state $i)] ${ITEM_NAMES[$i]}"; done
+    echo -e "${WHITE}  ── 部署后 ──${RESET}"
+    for i in "${POST_ITEMS[@]}"; do echo "  [$i] [$(get_item_state $i)] ${ITEM_NAMES[$i]}"; done
     echo -e "\n  ${CYAN}[B]${RESET} 返回"; read -p "编号: " it
     [ "$it" = "B" ] || [ "$it" = "b" ] && { main_menu; return; }
     [[ "$it" =~ ^[0-9]+$ ]] && [ "$it" -ge 1 ] && [ "$it" -le 12 ] && debug_item "$it"
@@ -1555,15 +1793,26 @@ view_logs() {
 exit_s() { log_info "退出"; echo "日志: $LOG_FILE"; exit 0; }
 
 show_help() {
-    echo "OpenClaw Linux 安全加固脚本 v1.2"
+    echo "OpenClaw Linux 安全加固脚本 v1.3"
     echo "用法: $0 [选项]"
-    echo "  --help         帮助"
-    echo "  --dry-run      模拟运行"
-    echo "  --status       查看状态"
-    echo "  --rollback N   回退加固项 N"
-    echo "  --debug N      调试加固项 N"
-    echo "  --apply N      应用加固项 N"
-    echo "  --all          一键加固"
+    echo ""
+    echo "  加固:"
+    echo "  --apply N        应用加固项 N"
+    echo "  --all            一键全部加固 (部署前+部署后)"
+    echo "  --pre            仅执行部署前加固 (${#PRE_ITEMS[@]}项)"
+    echo "  --post           仅执行部署后加固 (${#POST_ITEMS[@]}项)"
+    echo ""
+    echo "  回退:"
+    echo "  --rollback N     回退加固项 N"
+    echo "  --rollback-all   一键回退全部加固项"
+    echo "  --rollback-pre   一键回退部署前加固项"
+    echo "  --rollback-post  一键回退部署后加固项"
+    echo ""
+    echo "  其他:"
+    echo "  --help           帮助"
+    echo "  --dry-run        模拟运行"
+    echo "  --status         查看状态"
+    echo "  --debug N        调试加固项 N"
 }
 
 # ============================================================================
@@ -1575,24 +1824,69 @@ main() {
     detect_all
     
     local apply_items=()
+    local rollback_phase_arg=""
     while [[ $# -gt 0 ]]; do
         case $1 in
             --help|-h) show_help; exit 0 ;;
             --dry-run) DRY_RUN=1; shift ;;
             --status) show_status; exit 0 ;;
             --rollback) ROLLBACK_MODE=1; ROLLBACK_ITEM=$2; shift 2 ;;
+            --rollback-all)  rollback_phase_arg="ALL"; shift ;;
+            --rollback-pre)  rollback_phase_arg="PRE"; shift ;;
+            --rollback-post) rollback_phase_arg="POST"; shift ;;
             --debug) DEBUG_MODE=1; DEBUG_ITEM=$2; shift 2 ;;
             --apply) apply_items+=("$2"); shift 2 ;;
-            --all) apply_items=(1 2 3 4 5 6 7 8 9 10 11 12); shift ;;
+            --pre) apply_items=(${PRE_ITEMS[@]}); shift ;;
+            --post) apply_items=(${POST_ITEMS[@]}); shift ;;
+            --all) apply_items=(${PRE_ITEMS[@]} ${POST_ITEMS[@]}); shift ;;
             *) shift ;;
         esac
     done
     
     [ "$EUID" -ne 0 ] && [ "$DRY_RUN" -eq 0 ] && { echo "请使用 root 运行"; exit 1; }
     
-    [ "$ROLLBACK_MODE" -eq 1 ] && { rollback_item "$ROLLBACK_ITEM"; exit 0; }
+    # 单项回退 (命令行)
+    if [ "$ROLLBACK_MODE" -eq 1 ]; then
+        reset_report
+        rollback_item "$ROLLBACK_ITEM"
+        print_report "回退"
+        exit 0
+    fi
+    
+    # 批量回退 (命令行)
+    if [ -n "$rollback_phase_arg" ]; then
+        local rb_items=()
+        case $rollback_phase_arg in
+            PRE)  rb_items=("${PRE_ITEMS[@]}") ;;
+            POST) rb_items=("${POST_ITEMS[@]}") ;;
+            ALL)  rb_items=(12 11 10 9 8 7 6 5 4 3 2 1) ;;
+        esac
+        reset_report
+        for i in "${rb_items[@]}"; do
+            if [ "$(get_item_state $i)" = "applied" ]; then
+                echo -e "${YELLOW}回退 [$i] ${ITEM_NAMES[$i]}${RESET}"
+                rollback_item "$i"
+            else
+                ((REPORT_SKIPPED++))
+                REPORT_ITEMS_SKIP+=("[$i] ${ITEM_NAMES[$i]} (未加固)")
+            fi
+        done
+        print_report "回退"
+        exit 0
+    fi
+    
     [ "$DEBUG_MODE" -eq 1 ] && [ "$DEBUG_ITEM" -gt 0 ] 2>/dev/null && { debug_item "$DEBUG_ITEM"; exit 0; }
-    [ ${#apply_items[@]} -gt 0 ] && { for i in "${apply_items[@]}"; do echo -e "${CYAN}[$i] ${ITEM_NAMES[$i]}${RESET}"; apply_item "$i"; done; exit 0; }
+    
+    # 批量加固 (命令行)
+    if [ ${#apply_items[@]} -gt 0 ]; then
+        reset_report
+        for i in "${apply_items[@]}"; do
+            echo -e "${CYAN}[$i] ${ITEM_NAMES[$i]}${RESET}"
+            apply_item "$i"
+        done
+        print_report "加固"
+        exit 0
+    fi
     
     main_menu
 }
